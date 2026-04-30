@@ -31,7 +31,7 @@ def get_yesterday_range():
 
 def fetch_toggl_entries(start: str, end: str) -> list:
     """Fetch time entries from Toggl for given date range."""
-    url = f"https://api.track.toggl.com/api/v9/workspace/{TOGGL_WORKSPACE_ID}/time_entries"
+    url = f"https://api.track.toggl.com/api/v9/me/time_entries"
     params = {"start_date": start, "end_date": end}
     response = requests.get(
         url,
