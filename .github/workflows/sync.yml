@@ -4,7 +4,7 @@ on:
   schedule:
     # Runs at 7:00 AM Prague time (= 6:00 UTC in winter, 5:00 UTC in summer)
     # Using 6:00 UTC as safe default (works for CET/CEST)
-    - cron: "0 6 * * *"   # Mon–Fri only
+    - cron: "0 6 * * *"  
   workflow_dispatch:          # Allow manual trigger from GitHub UI
 
 jobs:
