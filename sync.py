@@ -29,6 +29,31 @@ def get_yesterday_range():
     return yesterday.isoformat(), today.isoformat()
 
 
+def get_last_week_range():
+    """Monday–Sunday of the previous week."""
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    last_monday = today - timedelta(days=today.weekday() + 7)
+    last_sunday = last_monday + timedelta(days=7)
+    return last_monday.isoformat(), last_sunday.isoformat()
+
+
+def get_last_month_range():
+    """First–last day of the previous month."""
+    today = datetime.now(timezone.utc)
+    first_this_month = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_month_end = first_this_month
+    last_month_start = (first_this_month - timedelta(days=1)).replace(day=1)
+    return last_month_start.isoformat(), last_month_end.isoformat()
+
+
+def is_monday() -> bool:
+    return datetime.now(timezone.utc).weekday() == 0
+
+
+def is_first_of_month() -> bool:
+    return datetime.now(timezone.utc).day == 1
+
+
 def fetch_toggl_entries(start: str, end: str) -> list:
     url = "https://api.track.toggl.com/api/v9/me/time_entries"
     params = {"start_date": start, "end_date": end}
@@ -42,6 +67,12 @@ def extract_issue_key(description: str) -> str | None:
         return None
     match = ISSUE_KEY_PATTERN.search(description.upper())
     return match.group(1) if match else None
+
+
+def extract_project(issue_key: str) -> str:
+    """Extract project prefix from issue key, e.g. SPBL-123 -> SPBL."""
+    parts = issue_key.split("-")
+    return parts[0] if len(parts) == 2 and parts[0].isalpha() else "OSTATNÍ"
 
 
 def aggregate_by_issue(entries: list) -> dict:
@@ -60,6 +91,20 @@ def aggregate_by_issue(entries: list) -> dict:
         totals[issue_key] += duration
     if skipped:
         print(f"  ⏭️  Skipped {len(skipped)} still-running entries")
+    return dict(totals)
+
+
+def aggregate_by_project(entries: list) -> dict:
+    """Aggregate raw seconds by project prefix."""
+    totals = defaultdict(int)
+    for entry in entries:
+        duration = entry.get("duration", 0)
+        if duration < 0:
+            continue
+        description = entry.get("description", "")
+        issue_key = extract_issue_key(description)
+        project = extract_project(issue_key) if issue_key else "OSTATNÍ"
+        totals[project] += duration
     return dict(totals)
 
 
@@ -99,7 +144,57 @@ def send_email(subject: str, html_body: str):
         print(f"⚠️  Email se nepodařilo odeslat: {response.status_code} {response.text[:200]}")
 
 
-def build_success_email(date_label: str, results: list) -> tuple[str, str]:
+def build_project_summary_html(title: str, period_label: str, entries: list) -> str:
+    """Build HTML block with per-project summary table."""
+    by_project = aggregate_by_project(entries)
+    if not by_project:
+        return f"""
+        <div style="margin-top:28px;">
+            <h3 style="color:#1565c0;border-bottom:2px solid #1565c0;padding-bottom:4px;">{title}</h3>
+            <p style="color:#888;">Žádná data za {period_label}.</p>
+        </div>"""
+
+    total = sum(by_project.values())
+    rows = ""
+    for project, secs in sorted(by_project.items(), key=lambda x: -x[1]):
+        pct = (secs / total * 100) if total > 0 else 0
+        bar_width = max(1, int(pct))
+        rows += f"""<tr>
+            <td style="padding:6px 12px;border-bottom:1px solid #eee;font-weight:bold;">{project}</td>
+            <td style="padding:6px 12px;border-bottom:1px solid #eee;">{format_duration(secs)}</td>
+            <td style="padding:6px 12px;border-bottom:1px solid #eee;">
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <div style="background:#1565c0;height:10px;width:{bar_width}px;border-radius:3px;min-width:2px;"></div>
+                    <span>{pct:.1f}%</span>
+                </div>
+            </td>
+        </tr>"""
+
+    return f"""
+    <div style="margin-top:28px;">
+        <h3 style="color:#1565c0;border-bottom:2px solid #1565c0;padding-bottom:4px;">{title}</h3>
+        <p style="color:#555;margin:4px 0 8px;">Období: <strong>{period_label}</strong> — celkem <strong>{format_duration(total)}</strong></p>
+        <table style="border-collapse:collapse;width:100%;">
+            <thead>
+                <tr style="background:#e3f2fd;">
+                    <th style="padding:8px 12px;text-align:left;">Projekt</th>
+                    <th style="padding:8px 12px;text-align:left;">Čas</th>
+                    <th style="padding:8px 12px;text-align:left;">Podíl</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+            <tfoot>
+                <tr style="background:#e3f2fd;">
+                    <td style="padding:8px 12px;font-weight:bold;">Celkem</td>
+                    <td style="padding:8px 12px;font-weight:bold;">{format_duration(total)}</td>
+                    <td style="padding:8px 12px;">100%</td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>"""
+
+
+def build_success_email(date_label: str, results: list, extra_html: str = "") -> tuple[str, str]:
     total_seconds = sum(r["rounded"] for r in results)
     subject = f"✅ Toggl→Jira sync {date_label} — {format_duration(total_seconds)} zalogováno"
     rows = "".join(
@@ -114,7 +209,7 @@ def build_success_email(date_label: str, results: list) -> tuple[str, str]:
         for r in results
     )
     html = f"""
-    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;">
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
         <h2 style="color:#2e7d32;">✅ Toggl → Jira sync proběhl úspěšně</h2>
         <p style="color:#555;">Datum: <strong>{date_label}</strong></p>
         <table style="border-collapse:collapse;width:100%;">
@@ -134,6 +229,19 @@ def build_success_email(date_label: str, results: list) -> tuple[str, str]:
                 </tr>
             </tfoot>
         </table>
+        {extra_html}
+    </div>"""
+    return subject, html
+
+
+def build_no_work_email(date_label: str, extra_html: str = "") -> tuple[str, str]:
+    """Email for days with no tracked work — used when summaries need to be sent anyway."""
+    subject = f"📋 Toggl→Jira sync {date_label} — žádná práce"
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+        <h2 style="color:#555;">📋 Toggl → Jira sync {date_label}</h2>
+        <p style="color:#888;">Za předchozí den nebyla zaznamenána žádná práce — do Jiry nebylo nic zalogováno.</p>
+        {extra_html}
     </div>"""
     return subject, html
 
@@ -142,7 +250,7 @@ def build_error_email(date_label: str, error_msg: str, failed_issues: list) -> t
     subject = f"❌ Toggl→Jira sync {date_label} — chyba"
     issues_html = "".join(f"<li>{i}</li>" for i in failed_issues) if failed_issues else ""
     html = f"""
-    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;">
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
         <h2 style="color:#c62828;">❌ Toggl → Jira sync selhal</h2>
         <p style="color:#555;">Datum: <strong>{date_label}</strong></p>
         <div style="background:#fff3f3;border-left:4px solid #c62828;padding:12px 16px;margin:16px 0;">
@@ -161,6 +269,7 @@ def main():
     print(f"\n🕐 Syncing Toggl → Jira for {date_label}")
     print(f"   Range: {start} → {end}\n")
 
+    # --- Fetch yesterday's entries ---
     try:
         entries = fetch_toggl_entries(start, end)
     except Exception as e:
@@ -170,14 +279,38 @@ def main():
 
     print(f"📥 Fetched {len(entries)} Toggl entries")
 
+    # --- Build optional summary sections ---
+    extra_html = ""
+
+    if is_monday():
+        print("📅 Monday — fetching last week summary...")
+        w_start, w_end = get_last_week_range()
+        w_label = f"{w_start[:10]} – {(datetime.fromisoformat(w_end) - timedelta(days=1)).strftime('%Y-%m-%d')}"
+        week_entries = fetch_toggl_entries(w_start, w_end)
+        extra_html += build_project_summary_html("📊 Přehled minulého týdne", w_label, week_entries)
+
+    if is_first_of_month():
+        print("📅 1st of month — fetching last month summary...")
+        m_start, m_end = get_last_month_range()
+        m_label = f"{m_start[:10]} – {(datetime.fromisoformat(m_end) - timedelta(days=1)).strftime('%Y-%m-%d')}"
+        month_entries = fetch_toggl_entries(m_start, m_end)
+        extra_html += build_project_summary_html("📊 Přehled minulého měsíce", m_label, month_entries)
+
+    # --- Nothing tracked yesterday ---
     if not entries:
-        print("✅ Nothing to sync.")
+        print("✅ No work yesterday.")
+        if extra_html:
+            subject, html = build_no_work_email(date_label, extra_html)
+            send_email(subject, html)
         return
 
     totals = aggregate_by_issue(entries)
 
     if not totals:
-        print("✅ No entries with valid issue keys found.")
+        print("✅ No entries with valid issue keys.")
+        if extra_html:
+            subject, html = build_no_work_email(date_label, extra_html)
+            send_email(subject, html)
         return
 
     print(f"\n📊 Aggregated {len(totals)} issue(s):")
@@ -185,6 +318,7 @@ def main():
         rounded = round_up_to_5_minutes(secs)
         print(f"   {key}: {format_duration(secs)} → rounded to {format_duration(rounded)}")
 
+    # --- Post to Jira ---
     started_dt = datetime.fromisoformat(start).strftime("%Y-%m-%dT09:00:00.000+0000")
     print(f"\n🚀 Posting worklogs to Jira...")
 
@@ -194,7 +328,6 @@ def main():
     for issue_key, raw_seconds in totals.items():
         rounded_seconds = round_up_to_5_minutes(raw_seconds)
         response = post_worklog(issue_key, rounded_seconds, started_dt)
-
         if response.status_code in (200, 201):
             print(f"   ✅ {issue_key}: {format_duration(rounded_seconds)} logged")
             success_results.append({"issue": issue_key, "raw": raw_seconds, "rounded": rounded_seconds})
@@ -211,7 +344,7 @@ def main():
         send_email(subject, html)
         raise SystemExit(1)
     else:
-        subject, html = build_success_email(date_label, success_results)
+        subject, html = build_success_email(date_label, success_results, extra_html)
         send_email(subject, html)
 
 
