@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import json
 import requests
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
@@ -13,15 +14,73 @@ JIRA_EMAIL = os.environ["JIRA_EMAIL"]
 JIRA_API_TOKEN = os.environ["JIRA_API_TOKEN"]
 SENDGRID_API_KEY = os.environ["SENDGRID_API_KEY"]
 NOTIFY_EMAIL = os.environ["NOTIFY_EMAIL"]
+GIST_TOKEN = os.environ["GIST_TOKEN"]
 
 JIRA_BASE_URL = f"https://{JIRA_DOMAIN}.atlassian.net"
 ISSUE_KEY_PATTERN = re.compile(r"([A-Z]+-\d+)")
+GIST_FILENAME = "toggl_jira_synced_dates.json"
 
 
-def round_up_to_5_minutes(seconds: int) -> int:
-    five_minutes = 5 * 60
-    return math.ceil(seconds / five_minutes) * five_minutes
+# ---------------------------------------------------------------------------
+# Gist helpers
+# ---------------------------------------------------------------------------
 
+def gist_headers() -> dict:
+    return {"Authorization": f"Bearer {GIST_TOKEN}", "Accept": "application/vnd.github+json"}
+
+
+def find_gist() -> str | None:
+    """Return gist ID if our tracking gist already exists, otherwise None."""
+    response = requests.get("https://api.github.com/gists", headers=gist_headers(), timeout=15)
+    response.raise_for_status()
+    for gist in response.json():
+        if GIST_FILENAME in gist.get("files", {}):
+            return gist["id"]
+    return None
+
+
+def create_gist() -> str:
+    """Create a new private gist and return its ID."""
+    payload = {
+        "description": "Toggl→Jira sync — already synced dates",
+        "public": False,
+        "files": {GIST_FILENAME: {"content": json.dumps([])}},
+    }
+    response = requests.post("https://api.github.com/gists", headers=gist_headers(), json=payload, timeout=15)
+    response.raise_for_status()
+    gist_id = response.json()["id"]
+    print(f"📝 Created new tracking gist: {gist_id}")
+    return gist_id
+
+
+def load_synced_dates(gist_id: str) -> list:
+    """Load list of already synced dates from gist."""
+    response = requests.get(f"https://api.github.com/gists/{gist_id}", headers=gist_headers(), timeout=15)
+    response.raise_for_status()
+    raw = response.json()["files"][GIST_FILENAME]["content"]
+    return json.loads(raw)
+
+
+def save_synced_dates(gist_id: str, dates: list):
+    """Save updated list of synced dates back to gist."""
+    payload = {"files": {GIST_FILENAME: {"content": json.dumps(sorted(dates))}}}
+    response = requests.patch(
+        f"https://api.github.com/gists/{gist_id}", headers=gist_headers(), json=payload, timeout=15
+    )
+    response.raise_for_status()
+    print(f"💾 Saved synced dates to gist")
+
+
+def is_already_synced(date_label: str) -> tuple[str, list]:
+    """Return (gist_id, synced_dates). Raises if date already synced."""
+    gist_id = find_gist() or create_gist()
+    synced_dates = load_synced_dates(gist_id)
+    return gist_id, synced_dates
+
+
+# ---------------------------------------------------------------------------
+# Date helpers
+# ---------------------------------------------------------------------------
 
 def get_yesterday_range():
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -30,7 +89,6 @@ def get_yesterday_range():
 
 
 def get_last_week_range():
-    """Monday–Sunday of the previous week."""
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     last_monday = today - timedelta(days=today.weekday() + 7)
     last_sunday = last_monday + timedelta(days=7)
@@ -38,7 +96,6 @@ def get_last_week_range():
 
 
 def get_last_month_range():
-    """First–last day of the previous month."""
     today = datetime.now(timezone.utc)
     first_this_month = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     last_month_end = first_this_month
@@ -53,6 +110,10 @@ def is_monday() -> bool:
 def is_first_of_month() -> bool:
     return datetime.now(timezone.utc).day == 1
 
+
+# ---------------------------------------------------------------------------
+# Toggl helpers
+# ---------------------------------------------------------------------------
 
 def fetch_toggl_entries(start: str, end: str) -> list:
     url = "https://api.track.toggl.com/api/v9/me/time_entries"
@@ -70,7 +131,6 @@ def extract_issue_key(description: str) -> str | None:
 
 
 def extract_project(issue_key: str) -> str:
-    """Extract project prefix from issue key, e.g. SPBL-123 -> SPBL."""
     parts = issue_key.split("-")
     return parts[0] if len(parts) == 2 and parts[0].isalpha() else "OSTATNÍ"
 
@@ -95,7 +155,6 @@ def aggregate_by_issue(entries: list) -> dict:
 
 
 def aggregate_by_project(entries: list) -> dict:
-    """Aggregate raw seconds by project prefix."""
     totals = defaultdict(int)
     for entry in entries:
         duration = entry.get("duration", 0)
@@ -107,6 +166,10 @@ def aggregate_by_project(entries: list) -> dict:
         totals[project] += duration
     return dict(totals)
 
+
+# ---------------------------------------------------------------------------
+# Jira helpers
+# ---------------------------------------------------------------------------
 
 def post_worklog(issue_key: str, duration_seconds: int, started: str):
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/worklog"
@@ -120,32 +183,17 @@ def post_worklog(issue_key: str, duration_seconds: int, started: str):
     return response
 
 
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
 def format_duration(seconds: int) -> str:
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     return f"{hours}h {minutes}m"
 
 
-def send_email(subject: str, html_body: str):
-    response = requests.post(
-        "https://api.sendgrid.com/v3/mail/send",
-        headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "personalizations": [{"to": [{"email": NOTIFY_EMAIL}]}],
-            "from": {"email": NOTIFY_EMAIL, "name": "Toggl→Jira Sync"},
-            "subject": subject,
-            "content": [{"type": "text/html", "value": html_body}],
-        },
-        timeout=15,
-    )
-    if response.status_code == 202:
-        print(f"📧 Email odeslán na {NOTIFY_EMAIL}")
-    else:
-        print(f"⚠️  Email se nepodařilo odeslat: {response.status_code} {response.text[:200]}")
-
-
 def build_project_summary_html(title: str, period_label: str, entries: list) -> str:
-    """Build HTML block with per-project summary table."""
     by_project = aggregate_by_project(entries)
     if not by_project:
         return f"""
@@ -194,6 +242,28 @@ def build_project_summary_html(title: str, period_label: str, entries: list) -> 
     </div>"""
 
 
+# ---------------------------------------------------------------------------
+# Email builders
+# ---------------------------------------------------------------------------
+
+def send_email(subject: str, html_body: str):
+    response = requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
+        json={
+            "personalizations": [{"to": [{"email": NOTIFY_EMAIL}]}],
+            "from": {"email": NOTIFY_EMAIL, "name": "Toggl→Jira Sync"},
+            "subject": subject,
+            "content": [{"type": "text/html", "value": html_body}],
+        },
+        timeout=15,
+    )
+    if response.status_code == 202:
+        print(f"📧 Email odeslán na {NOTIFY_EMAIL}")
+    else:
+        print(f"⚠️  Email se nepodařilo odeslat: {response.status_code} {response.text[:200]}")
+
+
 def build_success_email(date_label: str, results: list, extra_html: str = "") -> tuple[str, str]:
     total_seconds = sum(r["rounded"] for r in results)
     subject = f"✅ Toggl→Jira sync {date_label} — {format_duration(total_seconds)} zalogováno"
@@ -234,8 +304,18 @@ def build_success_email(date_label: str, results: list, extra_html: str = "") ->
     return subject, html
 
 
+def build_skipped_email(date_label: str, extra_html: str = "") -> tuple[str, str]:
+    subject = f"⏭️ Toggl→Jira sync {date_label} — již synchronizováno"
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+        <h2 style="color:#f57c00;">⏭️ Toggl → Jira sync {date_label}</h2>
+        <p style="color:#888;">Tento den byl již dříve synchronizován — do Jiry nebylo nic přidáno.</p>
+        {extra_html}
+    </div>"""
+    return subject, html
+
+
 def build_no_work_email(date_label: str, extra_html: str = "") -> tuple[str, str]:
-    """Email for days with no tracked work — used when summaries need to be sent anyway."""
     subject = f"📋 Toggl→Jira sync {date_label} — žádná práce"
     html = f"""
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
@@ -263,23 +343,23 @@ def build_error_email(date_label: str, error_msg: str, failed_issues: list) -> t
     return subject, html
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     start, end = get_yesterday_range()
     date_label = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     print(f"\n🕐 Syncing Toggl → Jira for {date_label}")
     print(f"   Range: {start} → {end}\n")
 
-    # --- Fetch yesterday's entries ---
-    try:
-        entries = fetch_toggl_entries(start, end)
-    except Exception as e:
-        subject, html = build_error_email(date_label, str(e), [])
-        send_email(subject, html)
-        raise
+    # --- Check gist for already synced dates ---
+    gist_id, synced_dates = is_already_synced(date_label)
+    already_synced = date_label in synced_dates
+    if already_synced:
+        print(f"⏭️  {date_label} already synced — skipping Jira upload")
 
-    print(f"📥 Fetched {len(entries)} Toggl entries")
-
-    # --- Build optional summary sections ---
+    # --- Build optional summary sections (always, regardless of sync status) ---
     extra_html = ""
 
     if is_monday():
@@ -296,7 +376,22 @@ def main():
         month_entries = fetch_toggl_entries(m_start, m_end)
         extra_html += build_project_summary_html("📊 Přehled minulého měsíce", m_label, month_entries)
 
-    # --- Nothing tracked yesterday ---
+    # --- If already synced, send skip email and exit ---
+    if already_synced:
+        subject, html = build_skipped_email(date_label, extra_html)
+        send_email(subject, html)
+        return
+
+    # --- Fetch yesterday's entries ---
+    try:
+        entries = fetch_toggl_entries(start, end)
+    except Exception as e:
+        subject, html = build_error_email(date_label, str(e), [])
+        send_email(subject, html)
+        raise
+
+    print(f"📥 Fetched {len(entries)} Toggl entries")
+
     if not entries:
         print("✅ No work yesterday.")
         if extra_html:
@@ -344,6 +439,9 @@ def main():
         send_email(subject, html)
         raise SystemExit(1)
     else:
+        # Mark as synced only on full success
+        synced_dates.append(date_label)
+        save_synced_dates(gist_id, synced_dates)
         subject, html = build_success_email(date_label, success_results, extra_html)
         send_email(subject, html)
 
