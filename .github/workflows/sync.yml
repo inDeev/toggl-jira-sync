@@ -2,8 +2,13 @@ name: Toggl → Jira Daily Sync
 
 on:
   schedule:
-    - cron: "0 4 * * *"    # Every day at 6:00 UTC (7:00 CET / 8:00 CEST)
-  workflow_dispatch:         # Allow manual trigger from GitHub UI
+    - cron: "0 6 * * *"    # Every day at 6:00 UTC (7:00 CET / 8:00 CEST)
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Date to sync (YYYY-MM-DD). Leave empty for yesterday."
+        required: false
+        default: ""
 
 jobs:
   sync:
@@ -30,4 +35,6 @@ jobs:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          SYNC_DATE: ${{ github.event.inputs.date }}
         run: python sync.py
