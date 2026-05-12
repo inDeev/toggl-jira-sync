@@ -20,6 +20,12 @@ JIRA_BASE_URL = f"https://{JIRA_DOMAIN}.atlassian.net"
 ISSUE_KEY_PATTERN = re.compile(r"([A-Z]+-\d+)")
 GIST_FILENAME = "toggl_jira_synced_dates.json"
 
+def round_up_to_5_minutes(seconds: int) -> int:
+    """Round up total seconds to nearest 5 minutes."""
+    five_minutes = 5 * 60
+    return math.ceil(seconds / five_minutes) * five_minutes
+
+
 
 # ---------------------------------------------------------------------------
 # Gist helpers
