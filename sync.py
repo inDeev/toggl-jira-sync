@@ -12,7 +12,7 @@ TOGGL_WORKSPACE_ID = os.environ["TOGGL_WORKSPACE_ID"]
 JIRA_DOMAIN = os.environ["JIRA_DOMAIN"]
 JIRA_EMAIL = os.environ["JIRA_EMAIL"]
 JIRA_API_TOKEN = os.environ["JIRA_API_TOKEN"]
-SENDGRID_API_KEY = os.environ["SENDGRID_API_KEY"]
+RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 NOTIFY_EMAIL = os.environ["NOTIFY_EMAIL"]
 GIST_TOKEN = os.environ["GIST_TOKEN"]
 
@@ -290,17 +290,17 @@ def build_project_summary_html(title: str, period_label: str, entries: list) -> 
 
 def send_email(subject: str, html_body: str):
     response = requests.post(
-        "https://api.sendgrid.com/v3/mail/send",
-        headers={"Authorization": f"Bearer {SENDGRID_API_KEY}", "Content-Type": "application/json"},
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
         json={
-            "personalizations": [{"to": [{"email": NOTIFY_EMAIL}]}],
-            "from": {"email": NOTIFY_EMAIL, "name": "Toggl→Jira Sync"},
+            "from": "Toggl→Jira Sync <onboarding@resend.dev>",
+            "to": [NOTIFY_EMAIL],
             "subject": subject,
-            "content": [{"type": "text/html", "value": html_body}],
+            "html": html_body,
         },
         timeout=15,
     )
-    if response.status_code == 202:
+    if response.status_code == 200:
         print(f"📧 Email odeslán na {NOTIFY_EMAIL}")
     else:
         print(f"⚠️ Email se nepodařilo odeslat: {response.status_code} {response.text[:200]}")
