@@ -289,21 +289,29 @@ def build_project_summary_html(title: str, period_label: str, entries: list) -> 
 # ---------------------------------------------------------------------------
 
 def send_email(subject: str, html_body: str):
+    payload = {
+        "from": "Toggl→Jira Sync <onboarding@resend.dev>",
+        "to": [NOTIFY_EMAIL],
+        "subject": subject,
+        "html": html_body,
+    }
+    print(f"📤 Odesílám email: '{subject}'")
+    print(f"   To: {NOTIFY_EMAIL}")
+    print(f"   From: {payload['from']}")
     response = requests.post(
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "from": "Toggl→Jira Sync <onboarding@resend.dev>",
-            "to": [NOTIFY_EMAIL],
-            "subject": subject,
-            "html": html_body,
-        },
+        json=payload,
         timeout=15,
     )
+    print(f"   HTTP {response.status_code}")
     if response.status_code == 200:
-        print(f"📧 Email odeslán na {NOTIFY_EMAIL}")
+        data = response.json()
+        print(f"📧 Email odeslán na {NOTIFY_EMAIL} (id: {data.get('id', '?')})")
     else:
-        print(f"⚠️ Email se nepodařilo odeslat: {response.status_code} {response.text[:200]}")
+        print(f"⚠️ Email se nepodařilo odeslat!")
+        print(f"   Status: {response.status_code}")
+        print(f"   Response: {response.text}")
 
 
 def build_success_email(date_label: str, results: list, extra_html: str = "") -> tuple[str, str]:
@@ -416,6 +424,15 @@ def main():
         w_label = f"{w_start[:10]} – {(datetime.fromisoformat(w_end) - timedelta(days=1)).strftime('%Y-%m-%d')}"
         week_entries = fetch_toggl_entries(w_start, w_end)
         extra_html += build_project_summary_html("📊 Přehled minulého týdne", w_label, week_entries)
+        week_by_project = aggregate_by_project(week_entries)
+        if week_by_project:
+            print(f"   📊 Týdenní přehled ({w_label}):")
+            week_total = sum(week_by_project.values())
+            for project, secs in sorted(week_by_project.items(), key=lambda x: -x[1]):
+                print(f"      {project}: {format_duration(secs)}")
+            print(f"      Celkem: {format_duration(week_total)}")
+        else:
+            print(f"   📊 Týdenní přehled ({w_label}): žádná data")
 
     if is_first_of_month():
         print("📅 1st of month detected — fetching last month summary...")
@@ -423,6 +440,15 @@ def main():
         m_label = f"{m_start[:10]} – {(datetime.fromisoformat(m_end) - timedelta(days=1)).strftime('%Y-%m-%d')}"
         month_entries = fetch_toggl_entries(m_start, m_end)
         extra_html += build_project_summary_html("📊 Přehled minulého měsíce", m_label, month_entries)
+        month_by_project = aggregate_by_project(month_entries)
+        if month_by_project:
+            print(f"   📊 Měsíční přehled ({m_label}):")
+            month_total = sum(month_by_project.values())
+            for project, secs in sorted(month_by_project.items(), key=lambda x: -x[1]):
+                print(f"      {project}: {format_duration(secs)}")
+            print(f"      Celkem: {format_duration(month_total)}")
+        else:
+            print(f"   📊 Měsíční přehled ({m_label}): žádná data")
 
     # --- If already synced, send skip email and exit ---
     if already_synced:
